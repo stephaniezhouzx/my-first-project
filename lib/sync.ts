@@ -1,3 +1,4 @@
+import { parseToDateMs } from "./date-format"
 import { getTenantAccessToken, fetchTableRecords, TABLE_IDS } from "./feishu"
 
 /** 从飞书 fields 取值（支持中文列名模糊匹配） */
@@ -60,27 +61,15 @@ function fieldBool(value: unknown): boolean {
   return ["true", "1", "yes", "是", "已授权", "有", "已开通"].includes(t)
 }
 
-/** 飞书日期/时间戳 → 中文 locale 日期字符串 */
-function parseDateMs(value: unknown): number | null {
-  if (value == null || value === "") return null
-  if (typeof value === "object" && value !== null) {
-    const o = value as Record<string, unknown>
-    if (typeof o.value === "number") return parseDateMs(o.value)
-    if (typeof o.text === "string") return parseDateMs(o.text)
+/** 飞书日期 → zh-CN（兼容 f['发布日期'] 数字时间戳） */
+function toZhDate(raw: unknown): string {
+  if (raw == null || raw === "") return ""
+  if (typeof raw === "number" || (typeof raw === "string" && /^\d{10,13}$/.test(String(raw).trim()))) {
+    const n = typeof raw === "number" ? raw : Number(raw)
+    return new Date(n < 1e12 ? n * 1000 : n).toLocaleDateString("zh-CN")
   }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    // 秒级时间戳（10 位）转毫秒
-    return value < 1e12 ? value * 1000 : value
-  }
-  const parsed = new Date(fieldText(value))
-  const ms = parsed.getTime()
-  return Number.isNaN(ms) ? null : ms
-}
-
-function fieldDate(value: unknown): string {
-  const ms = parseDateMs(value)
-  if (ms == null) return fieldText(value)
-  return new Date(ms).toLocaleDateString("zh-CN")
+  const date = new Date(raw as string | number)
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("zh-CN")
 }
 
 // 格式化达人数据库
@@ -126,20 +115,17 @@ function formatCreators(records: any[]) {
 function formatSamples(records: any[]) {
   return records.map((r, index) => {
     const f = (r.fields || {}) as Record<string, unknown>
-    const contactTimeRaw = getField(f, "对接时间", "联系时间")
-    const receiveDateRaw = getField(f, "确认收货日期", "收货日期")
-    const publishDateRaw = getField(f, "视频发布日期", "发布日期")
 
-    const contactTime = fieldDate(contactTimeRaw)
-    const receiveDate = fieldDate(receiveDateRaw)
-    const publishDate = fieldDate(publishDateRaw)
+    const contactTime = f["对接时间"] ? toZhDate(f["对接时间"]) : ""
+    const receiveDate = f["确认收货日期"] ? toZhDate(f["确认收货日期"]) : ""
+    const publishDate = f["视频发布日期"] ? toZhDate(f["视频发布日期"]) : ""
 
-    const daysRaw = getField(f, "收货到发布天数")
+    const daysRaw = f["收货到发布天数"]
     let daysToPublish: number | null =
       daysRaw != null && daysRaw !== "" ? fieldNumber(daysRaw) : null
-    if (daysToPublish == null && receiveDateRaw && publishDateRaw) {
-      const receiveMs = parseDateMs(receiveDateRaw)
-      const publishMs = parseDateMs(publishDateRaw)
+    if (daysToPublish == null && f["确认收货日期"] && f["视频发布日期"]) {
+      const receiveMs = parseToDateMs(f["确认收货日期"])
+      const publishMs = parseToDateMs(f["视频发布日期"])
       if (receiveMs != null && publishMs != null) {
         daysToPublish = Math.round(
           (publishMs - receiveMs) / (1000 * 60 * 60 * 24)
@@ -181,27 +167,27 @@ function formatSamples(records: any[]) {
 // 格式化内容表现表
 function formatContent(records: any[]) {
   return records.map((r, index) => {
-    const f = r.fields
+    const f = (r.fields || {}) as Record<string, unknown>
     const recordId = r.record_id || `content-${index}`
     return {
       id: recordId,
       record_id: recordId,
-      creatorAccount: f["达人账号"] || "",
-      videoLink: f["视频链接"] || "",
-      product: f["产品"] || "",
-      store: f["店铺"] || "",
-      publishDate: f["发布日期"] || "",
-      views: f["视频播放量"] || 0,
-      engagementRate: f["视频互动率"] || 0,
-      gpm: f["视频GPM"] || 0,
-      gmv: f["视频GMV"] || 0,
-      isHit: f["是否爆款"] || false,
-      liveCount: f["直播场次"] || 0,
-      liveViews: f["直播播放量"] || 0,
-      liveGpm: f["直播GPM"] || 0,
-      contentType: f["内容类型"] || "",
-      boostStatus: f["投流状态"] || "",
-      description: f["描述"] || "",
+      creatorAccount: fieldText(getField(f, "达人账号", "账号")),
+      videoLink: fieldText(getField(f, "视频链接", "链接")),
+      product: fieldText(getField(f, "产品", "商品")),
+      store: fieldText(getField(f, "店铺")),
+      publishDate: f["发布日期"] ? toZhDate(f["发布日期"]) : "",
+      views: fieldNumber(getField(f, "视频播放量", "播放量")),
+      engagementRate: fieldNumber(getField(f, "视频互动率", "互动率")),
+      gpm: fieldNumber(getField(f, "视频GPM", "GPM")),
+      gmv: fieldNumber(getField(f, "视频GMV", "GMV")),
+      isHit: fieldBool(getField(f, "是否爆款", "爆款")),
+      liveCount: fieldNumber(getField(f, "直播场次")),
+      liveViews: fieldNumber(getField(f, "直播播放量")),
+      liveGpm: fieldNumber(getField(f, "直播GPM")),
+      contentType: fieldText(getField(f, "内容类型")),
+      boostStatus: fieldText(getField(f, "投流状态", "投放状态")),
+      description: fieldText(getField(f, "描述", "备注")),
     }
   })
 }

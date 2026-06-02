@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { useFeishuData } from '@/contexts/feishu-data-context'
 
 export function AppHeader() {
-  const { lastSync, isSyncing, syncFeishu } = useFeishuData()
+  const { lastSync, isSyncing, syncError, syncFeishu } = useFeishuData()
 
   return (
     <header className="flex h-16 items-center justify-between border-b border-border bg-card px-6">
@@ -24,7 +24,12 @@ export function AppHeader() {
       </div>
 
       <div className="flex items-center gap-4">
-        {lastSync && (
+        {syncError && (
+          <span className="max-w-[200px] truncate text-xs text-destructive sm:max-w-xs">
+            {syncError}
+          </span>
+        )}
+        {lastSync && !syncError && (
           <span className="hidden text-xs text-muted-foreground sm:inline">
             上次同步: {lastSync}
           </span>
@@ -32,7 +37,7 @@ export function AppHeader() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => syncFeishu()}
+          onClick={() => void syncFeishu()}
           disabled={isSyncing}
         >
           {isSyncing ? (

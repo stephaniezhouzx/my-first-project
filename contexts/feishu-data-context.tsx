@@ -4,6 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -18,6 +19,25 @@ import {
   type ContentPerformance,
   type SalesConversion,
 } from '@/lib/mock-data'
+
+import { formatDisplayDate } from '@/lib/date-format'
+
+const STORAGE_KEY = 'bd-feishu-sync-v3'
+
+type SyncPayload = {
+  creators: unknown[]
+  samples: unknown[]
+  content: unknown[]
+  sales: unknown[]
+}
+
+type PersistedState = {
+  creators: Creator[]
+  samples: SampleRecord[]
+  content: ContentPerformance[]
+  sales: SalesConversion[]
+  lastSync: string
+}
 
 function normalizeCreators(raw: unknown[]): Creator[] {
   return raw.map((item) => {
@@ -47,7 +67,7 @@ function normalizeSamples(raw: unknown[]): SampleRecord[] {
       id: String(r.id ?? r.record_id ?? ''),
       creatorId: String(r.creatorId ?? r.id ?? r.record_id ?? ''),
       creatorAccount: String(r.creatorAccount ?? ''),
-      contactDate: String(r.contactDate ?? r.contactTime ?? ''),
+      contactDate: formatDisplayDate(r.contactDate ?? r.contactTime ?? ''),
       shop: String(r.shop ?? r.store ?? ''),
       sampleName: String(r.sampleName ?? ''),
       isFree: Boolean(r.isFree),
@@ -73,7 +93,7 @@ function normalizeContent(raw: unknown[]): ContentPerformance[] {
       id: String(r.id ?? r.record_id ?? ''),
       creatorAccount: String(r.creatorAccount ?? ''),
       product: String(r.product ?? ''),
-      publishDate: String(r.publishDate ?? ''),
+      publishDate: formatDisplayDate(r.publishDate ?? ''),
       views: Number(r.views ?? 0),
       engagementRate: Number(r.engagementRate ?? 0),
       gpm: Number(r.gpm ?? 0),
@@ -93,7 +113,7 @@ function normalizeSales(raw: unknown[]): SalesConversion[] {
       id: String(r.id ?? r.record_id ?? ''),
       creatorAccount: String(r.creatorAccount ?? ''),
       product: String(r.product ?? ''),
-      month: String(r.month ?? ''),
+      month: formatDisplayDate(r.month ?? '') || String(r.month ?? ''),
       attributedGmv: Number(r.attributedGmv ?? r.gmv ?? 0),
       netProfit: Number(r.netProfit ?? 0),
       roi: Number(r.roi ?? 0),
@@ -124,6 +144,78 @@ function buildMonthlyGmvTrend(sales: SalesConversion[]) {
     .sort((a, b) => a.month.localeCompare(b.month))
 }
 
+function applyPayload(payload: SyncPayload) {
+  return {
+    creators: normalizeCreators(payload.creators),
+    samples: normalizeSamples(payload.samples),
+    content: normalizeContent(payload.content),
+    sales: normalizeSales(payload.sales),
+  }
+}
+
+function loadPersistedState(): PersistedState | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as PersistedState
+  } catch {
+    return null
+  }
+}
+
+function persistState(state: PersistedState) {
+  if (typeof window === 'undefined') return
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  } catch (error) {
+    console.warn('无法写入 sessionStorage:', error)
+  }
+}
+
+async function fetchSyncPayload(): Promise<SyncPayload | null> {
+  const res = await fetch(`/api/sync?_=${Date.now()}`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+    },
+  })
+
+  let json: Record<string, unknown>
+  try {
+    json = (await res.json()) as Record<string, unknown>
+  } catch (error) {
+    console.error('解析同步响应 JSON 失败:', error)
+    return null
+  }
+
+  if (!res.ok) {
+    console.error('同步 HTTP 错误:', res.status, json.error ?? res.statusText)
+    return null
+  }
+
+  if (json.success === false) {
+    console.error('同步业务失败:', json.error)
+    return null
+  }
+
+  const data = (json.data ?? json) as Record<string, unknown>
+  if (!data || typeof data !== 'object') {
+    console.error('同步响应缺少 data 字段:', json)
+    return null
+  }
+
+  return {
+    creators: Array.isArray(data.creators) ? data.creators : [],
+    samples: Array.isArray(data.samples) ? data.samples : [],
+    content: Array.isArray(data.content) ? data.content : [],
+    sales: Array.isArray(data.sales) ? data.sales : [],
+  }
+}
+
 interface FeishuDataContextValue {
   creators: Creator[]
   samples: SampleRecord[]
@@ -134,6 +226,7 @@ interface FeishuDataContextValue {
   lastSync: string | null
   isSyncing: boolean
   hasSyncedFromFeishu: boolean
+  syncError: string | null
   syncFeishu: () => Promise<boolean>
 }
 
@@ -147,32 +240,72 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
   const [lastSync, setLastSync] = useState<string | null>(null)
   const [isSyncing, setIsSyncing] = useState(false)
   const [hasSyncedFromFeishu, setHasSyncedFromFeishu] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
+
+  const applySyncedData = useCallback((payload: SyncPayload) => {
+    const next = applyPayload(payload)
+    setCreators(next.creators)
+    setSamples(next.samples)
+    setContent(next.content)
+    setSales(next.sales)
+    const syncedAt = new Date().toLocaleString('zh-CN')
+    setLastSync(syncedAt)
+    setHasSyncedFromFeishu(true)
+    setSyncError(null)
+    persistState({ ...next, lastSync: syncedAt })
+    console.info(
+      '[FeishuData] 已更新:',
+      `达人 ${next.creators.length}`,
+      `寄样 ${next.samples.length}`,
+      `内容 ${next.content.length}`,
+      `销售 ${next.sales.length}`
+    )
+    return next
+  }, [])
+
+  useEffect(() => {
+    const saved = loadPersistedState()
+    if (!saved) return
+    setCreators(saved.creators)
+    setSamples(saved.samples)
+    setContent(saved.content)
+    setSales(saved.sales)
+    setLastSync(saved.lastSync)
+    setHasSyncedFromFeishu(true)
+    console.info('[FeishuData] 已从 sessionStorage 恢复上次同步数据')
+  }, [])
 
   const syncFeishu = useCallback(async () => {
     setIsSyncing(true)
+    setSyncError(null)
     try {
-      const res = await fetch('/api/sync')
-      const json = await res.json()
-      if (!json.success) {
-        console.error('同步失败:', json.error)
+      const payload = await fetchSyncPayload()
+      if (!payload) {
+        setSyncError('同步失败，请打开浏览器控制台查看详情')
         return false
       }
 
-      const data = json.data
-      setCreators(normalizeCreators(data.creators ?? []))
-      setSamples(normalizeSamples(data.samples ?? []))
-      setContent(normalizeContent(data.content ?? []))
-      setSales(normalizeSales(data.sales ?? []))
-      setLastSync(new Date().toLocaleString('zh-CN'))
-      setHasSyncedFromFeishu(true)
+      const next = applySyncedData(payload)
+      if (
+        next.creators.length === 0 &&
+        next.samples.length === 0 &&
+        next.content.length === 0 &&
+        next.sales.length === 0
+      ) {
+        setSyncError('接口返回成功但数据为空，请检查飞书表格权限与字段映射')
+        return false
+      }
+
       return true
     } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误'
       console.error('同步出错:', error)
+      setSyncError(message)
       return false
     } finally {
       setIsSyncing(false)
     }
-  }, [])
+  }, [applySyncedData])
 
   const topCreatorsByGmv = useMemo(() => buildTopCreatorsByGmv(creators), [creators])
   const monthlyGmvTrend = useMemo(() => buildMonthlyGmvTrend(sales), [sales])
@@ -188,6 +321,7 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
       lastSync,
       isSyncing,
       hasSyncedFromFeishu,
+      syncError,
       syncFeishu,
     }),
     [
@@ -200,6 +334,7 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
       lastSync,
       isSyncing,
       hasSyncedFromFeishu,
+      syncError,
       syncFeishu,
     ]
   )
