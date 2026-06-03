@@ -308,7 +308,10 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
   }, [applySyncedData])
 
   useEffect(() => {
-    void syncFeishu()
+    const timer = setTimeout(() => {
+      void syncFeishu()
+    }, 3000)
+    return () => clearTimeout(timer)
   }, [syncFeishu])
 
   const topCreatorsByGmv = useMemo(() => buildTopCreatorsByGmv(creators), [creators])
