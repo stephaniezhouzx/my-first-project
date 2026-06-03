@@ -307,6 +307,10 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
     }
   }, [applySyncedData])
 
+  useEffect(() => {
+    void syncFeishu()
+  }, [syncFeishu])
+
   const topCreatorsByGmv = useMemo(() => buildTopCreatorsByGmv(creators), [creators])
   const monthlyGmvTrend = useMemo(() => buildMonthlyGmvTrend(sales), [sales])
 
