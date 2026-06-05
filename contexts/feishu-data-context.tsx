@@ -22,7 +22,7 @@ import {
 
 import { formatDisplayDate } from '@/lib/date-format'
 
-const STORAGE_KEY = 'bd-feishu-sync-v3'
+const STORAGE_KEY = 'feishu-cache'
 
 type SyncPayload = {
   creators: unknown[]
@@ -173,8 +173,39 @@ function persistState(state: PersistedState) {
   }
 }
 
-async function fetchSyncPayload(): Promise<SyncPayload | null> {
-  const res = await fetch(`/api/sync?_=${Date.now()}`, {
+function loadInitialState(): {
+  creators: Creator[]
+  samples: SampleRecord[]
+  content: ContentPerformance[]
+  sales: SalesConversion[]
+  lastSync: string | null
+  hasSyncedFromFeishu: boolean
+} {
+  const saved = loadPersistedState()
+  if (saved) {
+    return {
+      creators: saved.creators,
+      samples: saved.samples,
+      content: saved.content,
+      sales: saved.sales,
+      lastSync: saved.lastSync,
+      hasSyncedFromFeishu: true,
+    }
+  }
+  return {
+    creators: mockCreators,
+    samples: mockSamples,
+    content: mockContent,
+    sales: mockSales,
+    lastSync: null,
+    hasSyncedFromFeishu: false,
+  }
+}
+
+async function fetchSyncPayload(force = false): Promise<SyncPayload | null> {
+  const params = new URLSearchParams({ _: String(Date.now()) })
+  if (force) params.set('force', '1')
+  const res = await fetch(`/api/sync?${params}`, {
     method: 'GET',
     cache: 'no-store',
     headers: {
@@ -202,6 +233,13 @@ async function fetchSyncPayload(): Promise<SyncPayload | null> {
     return null
   }
 
+  if (typeof json.fromCache === 'boolean') {
+    console.info(
+      '[FeishuData] 数据来源:',
+      json.fromCache ? '服务器缓存（30 分钟内）' : '飞书 API'
+    )
+  }
+
   const data = (json.data ?? json) as Record<string, unknown>
   if (!data || typeof data !== 'object') {
     console.error('同步响应缺少 data 字段:', json)
@@ -227,19 +265,22 @@ interface FeishuDataContextValue {
   isSyncing: boolean
   hasSyncedFromFeishu: boolean
   syncError: string | null
-  syncFeishu: () => Promise<boolean>
+  syncFeishu: (force?: boolean) => Promise<boolean>
 }
 
 const FeishuDataContext = createContext<FeishuDataContextValue | null>(null)
 
 export function FeishuDataProvider({ children }: { children: ReactNode }) {
-  const [creators, setCreators] = useState<Creator[]>(mockCreators)
-  const [samples, setSamples] = useState<SampleRecord[]>(mockSamples)
-  const [content, setContent] = useState<ContentPerformance[]>(mockContent)
-  const [sales, setSales] = useState<SalesConversion[]>(mockSales)
-  const [lastSync, setLastSync] = useState<string | null>(null)
+  const [initialState] = useState(loadInitialState)
+  const [creators, setCreators] = useState<Creator[]>(initialState.creators)
+  const [samples, setSamples] = useState<SampleRecord[]>(initialState.samples)
+  const [content, setContent] = useState<ContentPerformance[]>(initialState.content)
+  const [sales, setSales] = useState<SalesConversion[]>(initialState.sales)
+  const [lastSync, setLastSync] = useState<string | null>(initialState.lastSync)
   const [isSyncing, setIsSyncing] = useState(false)
-  const [hasSyncedFromFeishu, setHasSyncedFromFeishu] = useState(false)
+  const [hasSyncedFromFeishu, setHasSyncedFromFeishu] = useState(
+    initialState.hasSyncedFromFeishu
+  )
   const [syncError, setSyncError] = useState<string | null>(null)
 
   const applySyncedData = useCallback((payload: SyncPayload) => {
@@ -263,23 +304,11 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
     return next
   }, [])
 
-  useEffect(() => {
-    const saved = loadPersistedState()
-    if (!saved) return
-    setCreators(saved.creators)
-    setSamples(saved.samples)
-    setContent(saved.content)
-    setSales(saved.sales)
-    setLastSync(saved.lastSync)
-    setHasSyncedFromFeishu(true)
-    console.info('[FeishuData] 已从 sessionStorage 恢复上次同步数据')
-  }, [])
-
-  const syncFeishu = useCallback(async () => {
+  const syncFeishu = useCallback(async (force = false) => {
     setIsSyncing(true)
     setSyncError(null)
     try {
-      const payload = await fetchSyncPayload()
+      const payload = await fetchSyncPayload(force)
       if (!payload) {
         setSyncError('同步失败，请打开浏览器控制台查看详情')
         return false
@@ -308,11 +337,16 @@ export function FeishuDataProvider({ children }: { children: ReactNode }) {
   }, [applySyncedData])
 
   useEffect(() => {
+    if (initialState.hasSyncedFromFeishu) {
+      console.info('[FeishuData] 已从 sessionStorage 恢复，跳过自动同步')
+      return
+    }
+
     const timer = setTimeout(() => {
       void syncFeishu()
     }, 3000)
     return () => clearTimeout(timer)
-  }, [syncFeishu])
+  }, [syncFeishu, initialState.hasSyncedFromFeishu])
 
   const topCreatorsByGmv = useMemo(() => buildTopCreatorsByGmv(creators), [creators])
   const monthlyGmvTrend = useMemo(() => buildMonthlyGmvTrend(sales), [sales])

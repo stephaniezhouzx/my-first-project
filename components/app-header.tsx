@@ -37,7 +37,7 @@ export function AppHeader() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => void syncFeishu()}
+          onClick={() => void syncFeishu(true)}
           disabled={isSyncing}
         >
           {isSyncing ? (
